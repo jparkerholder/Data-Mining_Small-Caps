@@ -1,0 +1,495 @@
+---
+title: "Classifying Small Cap Stock Returns"
+author: "Jack Holder"
+date: "December 2016"
+output: html_document
+---
+
+``` {r, include=FALSE}
+options(java.parameters="-Xmx5000m")
+x <- c("tibble", "ISLR", "splines", "dplyr", "gam", "tree", "randomForest", "gbm", "leaps", "rminer", "nnet", "rpart", "rpart.plot", "bartMachine", "knitr", "gridExtra", "MASS", "ggplot2", "cowplot", "gbm")
+lapply(x, require, character.only = TRUE)
+
+```
+
+## (Very) Brief Theoretical Background
+
+Stocks are driven by a multitude of different macro-economic variables, and a great deal of work has been done to predict this. 
+
+There are also many who seek to analyze the relative performance between large-capitalization (large-cap) stocks, those who's total market value exceed a certain number, and small-capitalization stocks. Stocks in each of these different groups have different dynamics. Larger companies will tend to be more international, as larger companies derive more revenue from overseas, while smaller companies tend to be more domestic focussed. Smaller companies are also more volatile, as they have a higher probability of going bankrupt but also have more growth potential.
+
+I am looking to predict the daily difference in performance between large and small cap stocks, given the previous one-day and five-day performance for a variety of financial assets.  
+
+## Summary/Goals for this Project
+
+I look at each day's return as an independent datapoint, using the `Month` of the year as a categorical variable to factor in seasonality. I fit a series of models from a logit model to a random forest to predict whether small-caps will outperform large-caps on a given day. 
+
+
+## The Data
+
+I am using data from The Federal Reserve Bank of St. Louis (FRED), downloaded as a csv.
+
+```{r}
+setwd("/Users/jackholder/Documents/Columbia/Data Mining/")
+d <- read.csv("Project_Data.csv")
+``` 
+
+Some of the data comes out as a factor, I will fix this to be a number.
+
+```{r message = FALSE}
+d$TWUSD_5D <- as.numeric(as.character(d$TWUSD_5D))
+d$TWUSD_1D <- as.numeric(as.character(d$TWUSD_1D))
+d$SPX_5D <- as.numeric(as.character(d$SPX_5D))
+d$SPX_1D <- as.numeric(as.character(d$SPX_1D))
+d$RTY.SPX <- as.numeric(as.character(d$RTY.SPX))
+```
+
+```{r}
+d <- na.omit(d)
+str(d)
+```
+
+Here is a brief description of the variables:
+
+* `RTY.SPX`: the daily return for the RTY Index (Russell 2000) - the daily return for SPX (The S&P 500)
+* `WTI_1D` and `WTI_5D`: one-day and five-day change in crude oil, in percent
+* `TWUSD_1D` and `TWUSD_5D`: one-day and five-day change in the trade-weighted dollar, in percent
+* `3MLUSD_1D` and `3MLUSD_5D` one-day and five-day change in three month dollar libor, in basis points 
+* `1MLUSD_1D` and `1MLUSD_5D` one-day and five-day change in three month dollar libor, in basis points  
+* `3M1M_1D` and `3M1M_5D` one-day and five-day change in the three month - one month libor basis, in basis points  
+* `US1Y.FF_1D` and `US1Y.FF_5D` one-day and five-day chanbe in the the 1y US Treasury yield - Federal Funds rate, in basis points 
+* `TIP5Y5Y_1D` and `TIPS5Y5Y_5D` one-day and five-day change in the five year five year inflation forward, in basis points
+* `US10Y_1D` and `US10Y_5D` one-day and five-day change in the US ten year treasury yield, in basis points 
+
+As I am using individual day data, I am looking at this as a cross-section rather than time series. I use the percentage change for equity, currency and commodities, and absolute changes for fixed income instruments. 
+
+## Overview (+EDA)
+
+First up I look at the output data `RTY.SPX`, using unsupervised methods. Later, I use a categorical approach to see days when `RTY.SPX` is up and down, and find several approaches which predict this correctly >50% of the time. To begin, I add a binary variable which is equal to 1 if `RTY.SPX` is positive and 0 if it is negative. I will then look at a secondary level at the actual performance. 
+
+```{r echo = FALSE}
+d$y <- as.factor(ifelse(d$RTY.SPX >= 0, "Up", "Down"))
+
+p1 <- qplot(d$RTY.SPX, 
+      geom="histogram",
+      binwidth=0.2,
+      xlab="RTY - SPX",
+      fill=I("blue"),
+      col=I("black"))
+
+p2 <- ggplot(d) + geom_boxplot(aes(x = 1, y = RTY.SPX)) + 
+  labs(x= "", y = "RTY - SPX") 
+
+plot_grid(p1, p2)
+
+g1 <- ggplot(d) + geom_point(mapping = aes(x = d$RTY.SPX, y = d$RTY_1D, 
+                              color = as.factor(y))) +
+                             labs(x = "RTY - SPX", y = "RTY 1d")
+g2 <- ggplot(d) + geom_point(mapping = aes(x = d$RTY.SPX, y = d$RTY_5D, 
+                              color = as.factor(y))) +
+                             labs(x = "RTY - SPX", y = "RTY 5d")
+g3 <- ggplot(d) + geom_point(mapping = aes(x = d$RTY.SPX, y = d$SPX_1D, 
+                              color = as.factor(y))) +
+                             labs(x = "RTY - SPX", y = "SPX 1d")
+g4 <- ggplot(d) + geom_point(mapping = aes(x = d$RTY.SPX, y = d$SPX_5D, 
+                              color = as.factor(y))) +
+                             labs(x = "RTY - SPX", y = "SPX 5d")
+g5 <- ggplot(d) + geom_point(mapping = aes(x = d$RTY.SPX, y = d$TWUSD_1D, 
+                              color = as.factor(y))) +
+                             labs(x = "RTY - SPX", y = "TW USD 1d")
+g6 <- ggplot(d) + geom_point(mapping = aes(x = d$RTY.SPX, y = d$TIP5Y5Y_1D, 
+                              color = as.factor(y))) +
+                             labs(x = "RTY - SPX", y = "5y5y TIPS 1d")
+g7 <- ggplot(d) + geom_point(mapping = aes(x = d$RTY.SPX, y = d$WTI_1D, 
+                              color = as.factor(y))) +
+                             labs(x = "RTY - SPX", y = "WTI 1d")
+g8 <- ggplot(d) + geom_point(mapping = aes(x = d$RTY.SPX, y = d$WTI_5D, 
+                              color = as.factor(y))) +
+                             labs(x = "RTY - SPX", y = "WTI 5d")
+g9 <- ggplot(d) + geom_point(mapping = aes(x = d$RTY.SPX, y = d$US10Y_1D, 
+                              color = as.factor(y))) +
+                             labs(x = "RTY - SPX", y = "US 10y 1d")
+
+
+# https://github.com/hadley/ggplot2/wiki/Share-a-legend-between-two-ggplot2-graphs
+
+g_legend<-function(a.gplot){
+  tmp <- ggplot_gtable(ggplot_build(a.gplot))
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+  legend <- tmp$grobs[[leg]]
+  return(legend)
+  }
+
+mylegend<-g_legend(g1)
+
+grid.arrange(arrangeGrob(g1+ theme(legend.position="none"), 
+                         g2 + theme(legend.position="none"), 
+                         g3 + theme(legend.position="none"), 
+                         g4 + theme(legend.position="none"), 
+                         g5 + theme(legend.position="none"), 
+                         g6 + theme(legend.position="none"), 
+                         g7 + theme(legend.position="none"), 
+                         g8 + theme(legend.position="none"), 
+                         g9 + theme(legend.position="none"),
+                         nrow=3),
+             mylegend, heights=c(5, 1))
+```
+
+
+```{r include = FALSE}
+df <- data.frame(matrix(ncol = 4, nrow = 0))
+x <- c("method", "pct_correct", "buy_pct", "sell_pct")
+colnames(df) <- x
+str(df)
+```
+
+## The Predictions
+
+### Logit Model
+
+I begin with a simple logit model. As I am looking at this as a cross-sectional dataset I can randomly sample for my training data. 
+
+```{r}
+set.seed(123)
+training_sample <- sample(1:nrow(d), 0.9 * nrow(d), replace = FALSE)
+training <- d[training_sample, ]
+testing <- d[-training_sample, ]
+
+logit <- glm(y ~ . - RTY.SPX,
+             family = binomial, 
+             y = TRUE,
+             data = training)
+
+round(coef(logit), digits = 3)
+```
+
+Let's see how this goes on the testing data. I am looking to find the model with the highest percentage correct, and check the outputs of the positive and negative outcomes:
+
+```{r}
+yhat_logit <- as.numeric(predict(logit,
+                         newdata = within(testing, rm(y)),
+                         type = "response") > 0.5)
+
+yhat_logit <- ifelse(yhat_logit == 1, "Up", "Down")
+table(testing$y, yhat_logit)
+```
+
+See how `RTY.SPX` performs when we predict it is up or down:
+
+```{r}
+testing$Model <- yhat_logit
+testing %>% group_by(Model) %>% summarize(return = round(mean(RTY.SPX), 5))
+```
+
+```{r include = FALSE}
+i <- 1
+est <- yhat_logit
+
+df[i,1] <- "Logit"
+
+(df[i, 2] <- mean(testing$y == est))
+
+df[i, 3] <- (testing %>% group_by(Model) %>% 
+          summarize(return = round(mean(RTY.SPX), 5)) %>% 
+          filter(Model == "Up"))[1, 2]
+
+df[i, 4] <- (testing %>% group_by(Model) %>% 
+          summarize(return = round(mean(RTY.SPX), 5)) %>% 
+          filter(Model == "Down"))[1, 2]
+```
+
+I select a subset of the data to fit a simpler model, which will be less likely to overfit the data.
+
+```{r}
+logit2 <- glm(y ~ RTY_1D * RTY_5D + TWUSD_1D + US10Y_1D + WTI_1D,
+             family = binomial(link = "logit"), 
+             y = TRUE,
+             data = training)
+
+yhat_logit2 <- as.numeric(predict(logit2,
+                         newdata = within(testing, rm(y)),
+                         type = "response") > 0.5)
+
+yhat_logit2 <- ifelse(yhat_logit2 == 1, "Up", "Down")
+table(testing$y, yhat_logit2)
+testing$Model <- yhat_logit2
+testing %>% group_by(Model) %>% summarize(return = round(mean(RTY.SPX), 5))
+```
+
+```{r include = FALSE}
+i <- i + 1
+est <- yhat_logit2
+
+df[i,1] <- "Logit2"
+
+(df[i, 2] <- mean(testing$y == est))
+
+df[i, 3] <- (testing %>% group_by(Model) %>% 
+          summarize(return = round(mean(RTY.SPX), 5)) %>% 
+          filter(Model == "Up"))[1, 2]
+
+df[i, 4] <- (testing %>% group_by(Model) %>% 
+          summarize(return = round(mean(RTY.SPX), 5)) %>% 
+          filter(Model == "Down"))[1, 2]
+```
+
+### LDA and QDA 
+
+```{r}
+LDA <- lda(logit2$formula, data = training)
+yhat_LDA <- predict(LDA, newdata = testing)$class
+table(testing$y, yhat_LDA)
+testing$Model <- yhat_LDA
+testing %>% group_by(Model) %>% summarize(return = round(mean(RTY.SPX), 5))
+```
+
+```{r include = FALSE}
+i <- i + 1
+est <- yhat_LDA
+
+df[i,1] <- "LDA"
+
+(df[i, 2] <- mean(testing$y == est))
+
+df[i, 3] <- (testing %>% group_by(Model) %>% 
+          summarize(return = round(mean(RTY.SPX), 5)) %>% 
+          filter(Model == "Up"))[1, 2]
+
+df[i, 4] <- (testing %>% group_by(Model) %>% 
+          summarize(return = round(mean(RTY.SPX), 5)) %>% 
+          filter(Model == "Down"))[1, 2]
+```
+
+```{r}
+QDA <- qda(logit2$formula, data = training)
+yhat_QDA <- predict(QDA, newdata = testing)$class
+table(testing$y, yhat_QDA)
+testing$Model <- yhat_QDA
+testing %>% group_by(Model) %>% summarize(return = round(mean(RTY.SPX), 5))
+```
+
+```{r include = FALSE}
+i <- i + 1
+est <- yhat_QDA
+
+df[i,1] <- "QDA"
+
+(df[i, 2] <- mean(testing$y == est))
+
+df[i, 3] <- (testing %>% group_by(Model) %>% 
+          summarize(return = round(mean(RTY.SPX), 5)) %>% 
+          filter(Model == "Up"))[1, 2]
+
+df[i, 4] <- (testing %>% group_by(Model) %>% 
+          summarize(return = round(mean(RTY.SPX), 5)) %>% 
+          filter(Model == "Down"))[1, 2]
+```
+
+### Tree Methods
+
+Here I check to see if anything can be gained by looking at subsets of observations. Here I see times when the Russell 2000 is down >1% over the past day and >4% in the past five days. It appears that when these are both the case, the Russell is more likely to outperform the S&P the next day.
+
+```{r}
+group_by(d, RTY_1D < -1.0, RTY_5D < -4.0) %>% 
+  summarize(Return = mean(RTY.SPX, na.rm = TRUE))
+```
+
+Now we fit a simple tree, using the rpart package. A tree-based approach does make sense in this context given the combination of different financial price movements can severely alter their meaning. 
+
+```{r}
+set.seed(1)
+rty_tree <- rpart(y ~ RTY_1D + RTY_5D + TWUSD_1D + WTI_1D + US10Y_1D, 
+                  data = training,
+                  control = rpart.control(minsplit = 20, 
+                                          minbucket = 10,
+                                          cp = 0.005))
+rpart.plot(rty_tree, box.palette = "GnYlRd")
+```
+
+I check how it performs vs. the testing data.
+
+```{r}
+pred_tree <- predict(rty_tree, newdata = testing, type = "class")
+mean(testing$y == pred_tree)
+table(testing$y, pred_tree)
+```
+
+It seems to be less accurate than the previous methods, which does make sense given the potential to overfit. We now see how this would work as a trading strategy:
+
+```{r}
+testing$Model <- pred_tree
+testing %>% group_by(Model) %>% summarize(return = mean(RTY.SPX))
+```
+
+```{r include = FALSE}
+i <- i + 1
+est <- pred_tree
+
+df[i,1] <- "Tree"
+
+(df[i, 2] <- mean(testing$y == est))
+
+df[i, 3] <- (testing %>% group_by(Model) %>% 
+          summarize(return = round(mean(RTY.SPX), 5)) %>% 
+          filter(Model == "Up"))[1, 2]
+
+df[i, 4] <- (testing %>% group_by(Model) %>% 
+          summarize(return = round(mean(RTY.SPX), 5)) %>% 
+          filter(Model == "Down"))[1, 2]
+```
+
+I now look at the extensions of the tree method.
+
+### Boosting
+
+```{r}
+boosted <- gbm((as.numeric(y)-1) ~ RTY_1D + RTY_5D + TWUSD_1D + 
+                 WTI_1D + US10Y_1D, data = training)
+boosted_hat <- as.numeric(predict(boosted, newdata = within(testing, rm(y)),
+                                  n.trees = 50, type = "response") > 0.5) 
+
+boosted_hat <- ifelse(boosted_hat == 1, "Up", "Down")
+table(testing$y, boosted_hat)
+testing$Model <- boosted_hat
+testing %>% group_by(Model) %>% summarize(return = round(mean(RTY.SPX), 5))
+```
+
+```{r include = FALSE}
+i <- i + 1
+est <- boosted_hat
+
+df[i,1] <- "Boosting"
+
+(df[i, 2] <- mean(testing$y == est))
+
+df[i, 3] <- (testing %>% group_by(Model) %>% 
+          summarize(return = round(mean(RTY.SPX), 5)) %>% 
+          filter(Model == "Up"))[1, 2]
+
+df[i, 4] <- (testing %>% group_by(Model) %>% 
+          summarize(return = round(mean(RTY.SPX), 5)) %>% 
+          filter(Model == "Down"))[1, 2]
+```
+
+### Random Forest
+
+```{r}
+set.seed(2)
+rf <- randomForest(y ~ RTY_1D + RTY_5D + TWUSD_1D + WTI_1D + US10Y_1D, 
+                   data = training,
+                   mtry = 3, importance = TRUE)
+pb <- plot(rf)
+varImpPlot(rf)
+```
+
+Now check how it does vs. the testing data.
+
+```{r}
+forest_pred <- predict(rf, newdata = testing, type = "class")
+mean(testing$y == forest_pred)
+table(testing$y, forest_pred)
+```
+
+And see how this works as a signal to trade off:
+
+```{r}
+testing$Model <- forest_pred
+testing %>% group_by(Model) %>% summarize(return = mean(RTY.SPX))
+```
+
+```{r include = FALSE}
+i <- i + 1
+err <- forest_pred
+
+df[i,1] <- "Random Forest"
+
+(df[i, 2] <- mean(testing$y == err))
+
+df[i, 3] <- (testing %>% group_by(Model) %>% 
+          summarize(return = round(mean(RTY.SPX), 5)) %>% 
+          filter(Model == "Up"))[1, 2]
+
+df[i, 4] <- (testing %>% group_by(Model) %>% 
+          summarize(return = round(mean(RTY.SPX), 5)) %>% 
+          filter(Model == "Down"))[1, 2]
+```
+
+### BART
+
+```{r}
+SEED <- 123
+set_bart_machine_num_cores(4)
+y <- as.numeric(training$y)
+X <- training[ , 2:22]
+X_test <- testing
+bart <- bartMachine(X, y, num_trees = 50, seed = SEED)
+pred_bart <- predict(bart, new_data = testing[ , 2:22], type = "class")
+yhat_bart <- ifelse(pred_bart > 1.5, "Up", "Down")
+
+table(testing$y, yhat_bart)
+```
+
+Which appears to be one of the worst predictors thus far. As can be seen below, the strategy using this method actually loses money. 
+
+```{r}
+testing$Model <- yhat_bart
+testing %>% group_by(Model) %>% summarize(return = mean(RTY.SPX))
+```
+
+```{r include = FALSE}
+i <- i + 1
+err <- yhat_bart
+
+df[i,1] <- "BART"
+
+(df[i, 2] <- mean(testing$y == err))
+
+df[i, 3] <- (testing %>% group_by(Model) %>% 
+          summarize(return = round(mean(RTY.SPX), 5)) %>% 
+          filter(Model == "Up"))[1, 2]
+
+df[i, 4] <- (testing %>% group_by(Model) %>% 
+          summarize(return = round(mean(RTY.SPX), 5)) %>% 
+          filter(Model == "Down"))[1, 2]
+```
+
+### Neural Networks
+
+Finally, I look to see whether neural networks can effectively predict the Russell outperformance.
+
+```{r}
+nn_rty1 <- fit(logit2$formula, data = training, 
+                          task = "class", model = "mlp")
+yhat_nn <- predict(nn_rty1, newdata = testing)
+table(testing$y, yhat_nn)
+testing$Model <- yhat_nn
+testing %>% group_by(Model) %>% summarize(return = mean(RTY.SPX))
+```
+
+
+```{r include = FALSE}
+i <- i + 1
+err <- yhat_nn
+
+df[i,1] <- "Neural Net"
+
+(df[i, 2] <- mean(testing$y == err))
+
+df[i, 3] <- (testing %>% group_by(Model) %>% 
+          summarize(return = round(mean(RTY.SPX), 5)) %>% 
+          filter(Model == "Up"))[1, 2]
+
+df[i, 4] <- (testing %>% group_by(Model) %>% 
+          summarize(return = round(mean(RTY.SPX), 5)) %>% 
+          filter(Model == "Down"))[1, 2]
+```
+
+## Summary
+
+Now let's see which approach was the best:
+
+```{r echo = FALSE, results = 'asis'}
+kable(df)
+```
+
+The more targeted logit model and LDA both produce the same model, which is by far the best. This result is better than I anticipated from this project, now time to see if I can find some use for it!
